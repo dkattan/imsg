@@ -4084,18 +4084,77 @@ static NSDictionary *handleCheckIMessageAvailability(NSInteger requestId, NSDict
 static NSDictionary *handleDownloadPurgedAttachment(NSInteger requestId, NSDictionary *params) {
     NSString *attachmentGuid = params[@"attachmentGuid"];
     if (!attachmentGuid.length) return errorResponse(requestId, @"Missing attachmentGuid");
+
+    // Resolve timeout (seconds), default 60.
+    NSInteger timeoutSeconds = 60;
+    id timeoutParam = params[@"timeout"];
+    if ([timeoutParam isKindOfClass:[NSNumber class]]) {
+        timeoutSeconds = [(NSNumber *)timeoutParam integerValue];
+        if (timeoutSeconds < 1) timeoutSeconds = 60;
+    }
+
     Class ftcClass = NSClassFromString(@"IMFileTransferCenter");
     id ftc = ftcClass ? [ftcClass performSelector:@selector(sharedInstance)] : nil;
-    if (!ftc) return errorResponse(requestId, @"FileTransferCenter unavailable");
+    if (!ftc) return errorResponse(requestId, @"IMFileTransferCenter unavailable");
 
-    SEL sel = @selector(acceptTransfer:);
-    if (![ftc respondsToSelector:sel]) {
-        return errorResponse(requestId, @"acceptTransfer: not available");
+    // Use retrieveLocalFileURLForFileTransferWithGUID:options:completion: with
+    // options:1 for explicit CloudKit download of purged attachments.
+    SEL retrieveSel = NSSelectorFromString(
+        @"retrieveLocalFileURLForFileTransferWithGUID:options:completion:");
+    if (![ftc respondsToSelector:retrieveSel]) {
+        return errorResponse(requestId,
+            @"retrieveLocalFileURLForFileTransferWithGUID:options:completion: not available");
     }
+
+    // We need to bridge the ObjC block completion to a synchronous wait.
+    __block NSString *resultPath = nil;
+    __block NSString *errorDesc = nil;
+    __block BOOL done = NO;
+
+    // The completion handler takes (NSURL *, NSError *)
+    void (^completionBlock)(NSURL *, NSError *) = ^(NSURL *localURL, NSError *error) {
+        if (error) {
+            errorDesc = error.localizedDescription ?: error.domain;
+        } else if (localURL) {
+            resultPath = localURL.path;
+        } else {
+            errorDesc = @"Download completed but no file path returned";
+        }
+        done = YES;
+    };
+
+    // Cast the selector call through objc_msgSend for the private API.
+    typedef void (*RetrieveFunc)(id, SEL, NSString *, NSUInteger, void (^)(NSURL *, NSError *));
+    RetrieveFunc retrieveFunc = (RetrieveFunc)objc_msgSend;
+
     @try {
-        [ftc performSelector:sel withObject:attachmentGuid];
-    } @catch (NSException *ex) { return errorResponse(requestId, ex.reason ?: @"failed"); }
-    return successResponse(requestId, @{@"attachmentGuid": attachmentGuid, @"queued": @YES});
+        retrieveFunc(ftc, retrieveSel, attachmentGuid, (NSUInteger)1, completionBlock);
+    } @catch (NSException *ex) {
+        return errorResponse(requestId,
+            [NSString stringWithFormat:@"retrieveLocalFileURL failed: %@", ex.reason ?: @"unknown"]);
+    }
+
+    // Wait for the async completion (up to timeoutSeconds).
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeoutSeconds];
+    while (!done && [[NSDate date] compare:deadline] == NSOrderedAscending) {
+        [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                 beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.5]];
+    }
+
+    if (!done) {
+        return errorResponse(requestId,
+            [NSString stringWithFormat:@"Download timed out after %ld seconds", (long)timeoutSeconds]);
+    }
+
+    if (errorDesc) {
+        return errorResponse(requestId, errorDesc);
+    }
+
+    return successResponse(requestId, @{
+        @"attachmentGuid": attachmentGuid,
+        @"filename": resultPath ?: @"",
+        @"downloaded": @YES
+    });
 }
 
 #pragma mark - Command Router

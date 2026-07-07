@@ -34,6 +34,8 @@ public enum IMsgBridgeProtocol {
     case .sendMessage, .sendMultipart, .sendAttachment, .sendPoll, .sendReaction,
       .createChat:
       return defaultSendResponseTimeout
+    case .downloadPurgedAttachment:
+      return 60.0
     default:
       return defaultResponseTimeout
     }

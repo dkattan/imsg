@@ -53,6 +53,7 @@ let kSupportedRPCMethods: [String] = [
   "group.removeParticipant",
   "group.leave",
   "handles.check",
+  "attachment.download",
 ]
 
 final class RPCServer {
@@ -188,6 +189,8 @@ final class RPCServer {
         try await handleGroupLeave(id: id, params: params)
       case "handles.check":
         try await handleHandlesCheck(params: params, id: id)
+      case "attachment.download":
+        try await handleDownloadAttachment(params: params, id: id)
       default:
         output.sendError(id: id, error: RPCError.methodNotFound(method))
       }

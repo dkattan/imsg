@@ -143,6 +143,33 @@ extension RPCServer {
     respond(id: id, result: ["ok": true, "reaction": reactionType])
   }
 
+
+  func handleDownloadAttachment(params: [String: Any], id: Any?) async throws {
+    let guid = stringParam(
+      params["attachment_guid"] ?? params["attachmentGuid"]
+    ) ?? ""
+    let trimmed = guid.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      throw RPCError.invalidParams("attachment_guid is required")
+    }
+    var bridgeParams: [String: Any] = [
+      "attachmentGuid": trimmed,
+    ]
+    if let timeout = intParam(params["timeout"] ?? params["Timeout"]) {
+      bridgeParams["timeout"] = timeout
+    }
+    let data = try await invokeBridge(action: .downloadPurgedAttachment, params: bridgeParams)
+    var result: [String: Any] = ["ok": true]
+    if let filename = data["filename"] as? String {
+      result["filename"] = filename
+    }
+    if let downloaded = data["downloaded"] as? Bool {
+      result["downloaded"] = downloaded
+    }
+    result["attachment_guid"] = trimmed
+    respond(id: id, result: result)
+  }
+
   func handleMessageEdit(params: [String: Any], id: Any?) async throws {
     let chatGUID = try await resolveChatGUIDParam(params)
     guard let messageGUID = rpcMessageGUIDParam(params) else {

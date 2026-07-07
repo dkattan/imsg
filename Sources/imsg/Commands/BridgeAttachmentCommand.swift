@@ -87,3 +87,54 @@ enum SendAttachmentCommand {
     )
   }
 }
+
+
+// MARK: - download-attachment
+
+enum DownloadAttachmentCommand {
+  static let spec = CommandSpec(
+    name: "download-attachment",
+    abstract: "Download a purged/undownloaded iMessage attachment via the IMCore bridge",
+    discussion: """
+      Requires `imsg launch` (SIP-disabled, dylib injected). Triggers an explicit
+      CloudKit download of a purged attachment using IMFileTransferCenter's
+      retrieveLocalFileURLForFileTransferWithGUID:options:completion: API.
+      """,
+    signature: CommandSignatures.withRuntimeFlags(
+      CommandSignature(
+        options: CommandSignatures.baseOptions() + [
+          .make(label: "attachmentGuid", names: [.long("attachment-guid")], help: "attachment guid (e.g. at_0_3F664ACC-...)"),
+          .make(label: "timeout", names: [.long("timeout")], help: "download timeout in seconds (default: 60)"),
+        ]
+      )
+    ),
+    usageExamples: [
+      "imsg download-attachment --attachment-guid 'at_0_3F664ACC-1234-5678-9ABC-DEF012345678'"
+    ]
+  ) { values, runtime in
+    try await run(values: values, runtime: runtime)
+  }
+
+  static func run(values: ParsedValues, runtime: RuntimeOptions) async throws {
+    guard let guid = values.option("attachmentGuid"), !guid.isEmpty else {
+      throw ParsedValuesError.missingOption("attachmentGuid")
+    }
+    let timeoutStr = values.option("timeout") ?? "60"
+    let timeout = Int(timeoutStr) ?? 60
+    let params: [String: Any] = [
+      "attachmentGuid": guid,
+      "timeout": timeout,
+    ]
+    let data = try await IMsgBridgeClient.shared.invoke(
+      action: .downloadPurgedAttachment,
+      params: params,
+      timeout: TimeInterval(timeout)
+    )
+    let filename = (data["filename"] as? String) ?? ""
+    BridgeOutput.emit(
+      data,
+      runtime: runtime,
+      summary: "download-attachment: \(filename.isEmpty ? "no path" : filename)"
+    )
+  }
+}

@@ -26,6 +26,7 @@ struct CommandRouter {
       SendRichCommand.spec,
       SendMultipartCommand.spec,
       SendAttachmentCommand.spec,
+      DownloadAttachmentCommand.spec,
       PollCommand.spec,
       BridgeReactCommand.spec,
       EditCommand.spec,
