@@ -36,15 +36,15 @@ build:
 # Uses arm64e architecture to match Messages.app on Apple Silicon.
 # Requires SIP disabled on the target machine to inject into system apps.
 build-dylib:
-	@echo "Building imsg-bridge-helper.dylib (injectable)..."
+	@echo "Building imsg-bridge-helper.dylib (universal, injectable)..."
 	@mkdir -p .build/release
-	@clang -dynamiclib -arch arm64e -fobjc-arc \
+	@clang -dynamiclib -arch arm64e -arch x86_64 -fobjc-arc \
 		-Wno-arc-performSelector-leaks \
 		-framework Foundation \
 		-framework AppKit \
 		-o .build/release/imsg-bridge-helper.dylib \
 		Sources/IMsgHelper/IMsgInjected.m
-	@echo "Built .build/release/imsg-bridge-helper.dylib"
+	@echo "Built .build/release/imsg-bridge-helper.dylib (arm64e x86_64)"
 
 imsg:
 	scripts/generate-version.sh

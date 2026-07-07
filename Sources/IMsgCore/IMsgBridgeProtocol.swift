@@ -35,7 +35,7 @@ public enum IMsgBridgeProtocol {
       .createChat:
       return defaultSendResponseTimeout
     case .downloadPurgedAttachment:
-      return 60.0
+      return 120.0
     default:
       return defaultResponseTimeout
     }

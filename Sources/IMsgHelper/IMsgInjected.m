@@ -4116,7 +4116,20 @@ static NSDictionary *handleDownloadPurgedAttachment(NSInteger requestId, NSDicti
         if (error) {
             errorDesc = error.localizedDescription ?: error.domain;
         } else if (localURL) {
-            resultPath = localURL.path;
+            // Use absoluteString instead of path to get a clean URL string,
+            // and fall back to path if absoluteString is empty. Some NSURL
+            // objects from IMCore contain non-UTF8 path components that
+            // break NSJSONSerialization when accessed via .path.
+            NSString *p = localURL.path;
+            if (p && [p canBeConvertedToEncoding:NSUTF8StringEncoding]) {
+                resultPath = p;
+            } else if (localURL.absoluteString.length > 0 &&
+                       [localURL.absoluteString canBeConvertedToEncoding:NSUTF8StringEncoding]) {
+                resultPath = localURL.absoluteString;
+            } else {
+                // Last resort: file:// URL with percent-encoding
+                resultPath = [localURL.absoluteString stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLPathAllowedCharacterSet]];
+            }
         } else {
             errorDesc = @"Download completed but no file path returned";
         }
