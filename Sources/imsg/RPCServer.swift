@@ -192,6 +192,8 @@ final class RPCServer {
         try await handleGroupLeave(id: id, params: params)
       case "handles.check":
         try await handleHandlesCheck(params: params, id: id)
+      case "bridge.introspect":
+        try await handleBridgeIntrospect(params: params, id: id as Any?)
       default:
         output.sendError(id: id, error: RPCError.methodNotFound(method))
       }

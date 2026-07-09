@@ -636,7 +636,10 @@ static id findChat(NSString *identifier) {
 static NSDictionary* handleTyping(NSInteger requestId, NSDictionary *params) {
     NSString *handle = params[@"handle"];
     NSNumber *state = params[@"typing"] ?: params[@"state"];
-    debugLog(@"handleTyping: enter handle=%@ state=%@ params=%@", handle, state, params);
+    NSString *messageGuid = params[@"messageGuid"] ?: params[@"replyToGuid"]
+        ?: params[@"reply_to"] ?: params[@"replyTo"];
+    debugLog(@"handleTyping: enter handle=%@ state=%@ messageGuid=%@ params=%@",
+             handle, state, messageGuid, params);
 
     if (!handle) {
         return errorResponse(requestId, @"Missing required parameter: handle");
@@ -652,6 +655,21 @@ static NSDictionary* handleTyping(NSInteger requestId, NSDictionary *params) {
     }
 
     @try {
+        // Thread-aware typing: set the typingGUID property directly (just an
+        // NSString setter — no message loading, no main-thread blocking) before
+        // calling setLocalUserIsTyping:. This routes the typing indicator to
+        // the correct thread in Messages.app.
+        if (messageGuid.length) {
+            SEL setTypingGuidSel = @selector(setTypingGUID:);
+            if ([chat respondsToSelector:setTypingGuidSel]) {
+                NSString *guidToSet = typing ? messageGuid : @"";
+                ((void (*)(id, SEL, NSString *))objc_msgSend)(chat, setTypingGuidSel, guidToSet);
+                debugLog(@"handleTyping: setTypingGUID:%@ (typing=%d)", guidToSet, typing);
+            } else {
+                debugLog(@"handleTyping: setTypingGUID: not available, typing will be unthreaded");
+            }
+        }
+
         // Gather diagnostic info
         NSString *chatGUID = @"unknown";
         NSString *chatIdent = @"unknown";
@@ -700,7 +718,13 @@ static NSDictionary* handleTyping(NSInteger requestId, NSDictionary *params) {
         NSLog(@"[imsg-bridge] Chat found: class=%@, guid=%@, identifier=%@, supportsTyping=%@",
               chatClass, chatGUID, chatIdent, supportsTyping ? @"YES" : @"NO");
 
+        // When a messageGuid is set, we set typingGUID before calling
+        // setLocalUserIsTyping:. Note: setLocalUserIsComposing: reads
+        // typingGUID but blocks the main thread (loads message via
+        // IMChatHistoryController), so we stick with setLocalUserIsTyping:
+        // and rely on typingGUID being picked up.
         SEL typingSel = @selector(setLocalUserIsTyping:);
+
         if ([chat respondsToSelector:typingSel]) {
             NSMethodSignature *sig = [chat methodSignatureForSelector:typingSel];
             if (!sig) {
@@ -713,18 +737,15 @@ static NSDictionary* handleTyping(NSInteger requestId, NSDictionary *params) {
             [inv setArgument:&typing atIndex:2];
             [inv invoke];
 
-            BOOL afterTyping = NO;
-            if ([chat respondsToSelector:@selector(isCurrentlyTyping)]) {
-                afterTyping = ((BOOL (*)(id, SEL))objc_msgSend)(chat, @selector(isCurrentlyTyping));
-            }
-            debugLog(@"handleTyping: setLocalUserIsTyping:%d returned, isCurrentlyTyping after=%d",
-                     typing, afterTyping);
+            debugLog(@"handleTyping: setLocalUserIsTyping:%d (threaded=%d, typingGUID=%@)",
+                     typing, messageGuid.length > 0, messageGuid.length ? messageGuid : @"none");
 
-            NSLog(@"[imsg-bridge] Called setLocalUserIsTyping:%@ for %@",
-                  typing ? @"YES" : @"NO", handle);
+            NSLog(@"[imsg-bridge] Called setLocalUserIsTyping:%@ for %@ (threaded=%d)",
+                  typing ? @"YES" : @"NO", handle, messageGuid.length > 0);
             return successResponse(requestId, @{
                 @"handle": handle,
-                @"typing": @(typing)
+                @"typing": @(typing),
+                @"threaded": @(messageGuid.length > 0)
             });
         }
 
@@ -1210,6 +1231,7 @@ static id constructIMMessageViaItem(NSAttributedString *attributedText,
                                     NSString *effectId,
                                     NSString *threadIdentifier,
                                     id threadOriginator,
+                                    NSString *threadOriginatorGuid,
                                     NSString *associatedMessageGuid,
                                     long long associatedMessageType,
                                     NSRange associatedMessageRange,
@@ -1295,6 +1317,17 @@ static id constructIMMessageViaItem(NSAttributedString *attributedText,
         && [item respondsToSelector:@selector(setThreadOriginator:)]) {
         [item performSelector:@selector(setThreadOriginator:)
                    withObject:threadOriginator];
+    }
+    // When deriveThreadIdentifier failed to load the parent IMMessage (so
+    // threadOriginator is nil), set the GUID string directly on the item.
+    // This ensures chat.db records thread_originator_guid even when the
+    // full IMMessage object isn't available from IMChatHistoryController.
+    if (!threadOriginator && threadOriginatorGuid.length) {
+        SEL originatorGuidSel = NSSelectorFromString(@"setThreadOriginatorGUID:");
+        if ([item respondsToSelector:originatorGuidSel]) {
+            [item performSelector:originatorGuidSel
+                       withObject:threadOriginatorGuid];
+        }
     }
 
     NSMethodSignature *wsig =
@@ -2148,6 +2181,7 @@ static id buildIMMessage(NSAttributedString *body,
                          NSString *effectId,
                          NSString *threadIdentifier,
                          id threadOriginator,
+                         NSString *threadOriginatorGuid,
                          NSString *associatedMessageGuid,
                          long long associatedMessageType,
                          NSRange associatedMessageRange,
@@ -2169,6 +2203,7 @@ static id buildIMMessage(NSAttributedString *body,
         id viaItem = constructIMMessageViaItem(body, subject, effectId,
                                                 threadIdentifier,
                                                 threadOriginator,
+                                                threadOriginatorGuid,
                                                 associatedMessageGuid,
                                                 associatedMessageType,
                                                 associatedMessageRange,
@@ -2515,6 +2550,7 @@ static NSDictionary *handleSendMessage(NSInteger requestId, NSDictionary *params
     NSString *effectId = params[@"effectId"];
     NSString *subject = params[@"subject"];
     NSString *selectedMessageGuid = params[@"selectedMessageGuid"];
+    NSString *threadOriginatorGuid = params[@"threadOriginatorGuid"];
     NSNumber *partIndexNum = params[@"partIndex"];
     NSInteger partIndex = partIndexNum ? [partIndexNum integerValue] : 0;
     NSNumber *ddScanNum = params[@"ddScan"];
@@ -2550,15 +2586,27 @@ static NSDictionary *handleSendMessage(NSInteger requestId, NSDictionary *params
     // as a threaded in-line reply rather than a standalone message.
     // Best-effort: if we can't derive the parent, retain the older associated-message
     // fallback so receivers can still render a quoted reply.
+    //
+    // When the caller provides threadOriginatorGuid explicitly, use it to
+    // derive the thread identifier and resolve the parent message/item. This
+    // avoids relying on IMChatHistoryController to load the reply target
+    // (selectedMessageGuid), which may fail for older messages not in the
+    // history cache. If deriveThreadIdentifier succeeds for the originator,
+    // the resulting parentMessage/parentItem are used for thread_originator
+    // and threadIdentifier on the outgoing message.
+    NSString *threadLookupGuid = threadOriginatorGuid.length
+        ? threadOriginatorGuid
+        : selectedMessageGuid;
     id parentMessage = nil;
     id parentItem = nil;
     NSString *threadIdentifier = nil;
-    if (selectedMessageGuid.length) {
-        threadIdentifier = deriveThreadIdentifier(selectedMessageGuid,
+    if (threadLookupGuid.length) {
+        threadIdentifier = deriveThreadIdentifier(threadLookupGuid,
                                                   &parentMessage,
                                                   &parentItem);
-        debugLog(@"handleSendMessage: parent=%@ threadId=%@",
-                 selectedMessageGuid, threadIdentifier ?: @"(none)");
+        debugLog(@"handleSendMessage: parent=%@ threadId=%@ originator=%@",
+                 threadLookupGuid, threadIdentifier ?: @"(none)",
+                 threadOriginatorGuid.length ? @"explicit" : @"from-reply-to");
     } else {
         clearThreadContextForChat(chat, nil);
     }
@@ -2568,6 +2616,7 @@ static NSDictionary *handleSendMessage(NSInteger requestId, NSDictionary *params
                                       effectId,
                                       threadIdentifier,
                                       parentItem,
+                                      threadOriginatorGuid,
                                       selectedMessageGuid,
                                       associatedType,
                                       zeroRange,
@@ -2996,6 +3045,7 @@ static NSDictionary *handleSendMultipart(NSInteger requestId, NSDictionary *para
         }
         id imMessage = buildIMMessage(body, subjectAttr, effectId, threadIdentifier,
                                       parentItem,
+                                      nil,
                                       selectedMessageGuid, associatedType,
                                       NSMakeRange(0, body.length),
                                       nil, @[], NO, NO);
@@ -3222,6 +3272,7 @@ static NSDictionary *handleSendAttachment(NSInteger requestId, NSDictionary *par
     NSString *effectId = params[@"effectId"];
     NSString *subject = params[@"subject"];
     NSString *selectedMessageGuid = params[@"selectedMessageGuid"];
+    NSString *threadOriginatorGuid = params[@"threadOriginatorGuid"];
     NSNumber *partIndexNum = params[@"partIndex"];
     NSInteger partIndex = partIndexNum ? [partIndexNum integerValue] : 0;
     NSNumber *audioFlag = params[@"isAudioMessage"];
@@ -3290,21 +3341,27 @@ static NSDictionary *handleSendAttachment(NSInteger requestId, NSDictionary *par
             ? buildPlainAttributed(subject, 0)
             : nil;
         long long associatedType = selectedMessageGuid.length ? 100 : 0;
+
+        NSString *threadLookupGuid = threadOriginatorGuid.length
+            ? threadOriginatorGuid
+            : selectedMessageGuid;
         id parentMessage = nil;
         id parentItem = nil;
         NSString *threadIdentifier = nil;
-        if (selectedMessageGuid.length) {
-            threadIdentifier = deriveThreadIdentifier(selectedMessageGuid,
+        if (threadLookupGuid.length) {
+            threadIdentifier = deriveThreadIdentifier(threadLookupGuid,
                                                       &parentMessage,
                                                       &parentItem);
-            debugLog(@"handleSendAttachment: parent=%@ threadId=%@",
-                     selectedMessageGuid, threadIdentifier ?: @"(none)");
+            debugLog(@"handleSendAttachment: parent=%@ threadId=%@ originator=%@",
+                     threadLookupGuid, threadIdentifier ?: @"(none)",
+                     threadOriginatorGuid.length ? @"explicit" : @"from-reply-to");
         } else {
             clearThreadContextForChat(chat, nil);
         }
 
         id imMessage = buildIMMessage(body, subjectAttr, effectId, threadIdentifier,
                                       parentItem,
+                                      threadOriginatorGuid,
                                       selectedMessageGuid, associatedType,
                                       NSMakeRange(0, body.length), nil,
                                       @[transferGuid], isAudio, NO);
@@ -3482,6 +3539,7 @@ static NSDictionary *handleSendReaction(NSInteger requestId, NSDictionary *param
     });
     @try {
         id imMessage = buildIMMessage(body, nil, nil, nil,
+                                      nil,
                                       nil,
                                       associatedRef,
                                       associatedType,
@@ -4084,7 +4142,7 @@ static NSDictionary *handleCreateChat(NSInteger requestId, NSDictionary *params)
         NSAttributedString *body = buildPlainAttributed(initialMessage, 0);
         @try {
             id imMessage = buildIMMessage(body, nil, nil, nil, nil,
-                                          nil, 0,
+                                          nil, nil, 0,
                                           NSMakeRange(0, body.length),
                                           nil, @[], NO, NO);
             if (imMessage) {
@@ -4244,6 +4302,68 @@ static NSDictionary *handleDownloadPurgedAttachment(NSInteger requestId, NSDicti
 
 #pragma mark - Command Router
 
+static NSDictionary* handleIntrospect(NSInteger requestId, NSDictionary *params) {
+    NSMutableDictionary *result = [NSMutableDictionary dictionary];
+    
+    // IMChat typing/thread/reply methods
+    Class imChatClass = NSClassFromString(@"IMChat");
+    if (imChatClass) {
+        unsigned int count = 0;
+        Method *methods = class_copyMethodList(imChatClass, &count);
+        NSMutableArray *chatMethods = [NSMutableArray array];
+        for (unsigned int i = 0; i < count; i++) {
+            const char *name = sel_getName(method_getName(methods[i]));
+            NSString *nsName = [NSString stringWithUTF8String:name];
+            NSString *lower = [nsName lowercaseString];
+            if ([lower containsString:@"typing"] || [lower containsString:@"thread"] ||
+                [lower containsString:@"reply"] || [lower containsString:@"originator"] ||
+                [lower containsString:@"composing"] || [lower containsString:@"draft"]) {
+                [chatMethods addObject:nsName];
+            }
+        }
+        free(methods);
+        result[@"imChatMethods"] = chatMethods;
+    }
+    
+    // IMMessageItem thread/originator methods
+    Class itemClass = NSClassFromString(@"IMMessageItem");
+    if (itemClass) {
+        unsigned int count = 0;
+        Method *methods = class_copyMethodList(itemClass, &count);
+        NSMutableArray *itemMethods = [NSMutableArray array];
+        for (unsigned int i = 0; i < count; i++) {
+            const char *name = sel_getName(method_getName(methods[i]));
+            NSString *nsName = [NSString stringWithUTF8String:name];
+            NSString *lower = [nsName lowercaseString];
+            if ([lower containsString:@"typing"] || [lower containsString:@"thread"] ||
+                [lower containsString:@"originator"] || [lower containsString:@"reply"]) {
+                [itemMethods addObject:nsName];
+            }
+        }
+        free(methods);
+        result[@"imMessageItemMethods"] = itemMethods;
+    }
+    
+    // Check for thread/typing related classes
+    NSArray *candidates = @[
+        @"IMThreadChat", @"IMThreadedChat", @"IMReplyChat",
+        @"IMThreadContext", @"IMThreadTypingIndicator",
+        @"IMTypingIndicator", @"IMTypingChatItem", @"IMTypingMessagePartChatItem",
+        @"IMMessagePartChatItem", @"IMThreadAwareChat",
+        @"IMThreadOriginatorChatItem", @"IMReplyContext", @"IMThreadState",
+        @"IMChatThreadContext", @"IMThreadedChatItem", @"IMTypingItem"
+    ];
+    NSMutableArray *foundClasses = [NSMutableArray array];
+    for (NSString *className in candidates) {
+        if (NSClassFromString(className)) {
+            [foundClasses addObject:className];
+        }
+    }
+    result[@"foundClasses"] = foundClasses;
+    
+    return successResponse(requestId, result);
+}
+
 /// Dispatch an action by name, returning a legacy-envelope NSDictionary. Used
 /// by both the v1 single-file IPC path and (after key-stripping) the v2 path.
 static NSDictionary* dispatchAction(NSInteger legacyId, NSString *action,
@@ -4259,6 +4379,8 @@ static NSDictionary* dispatchAction(NSInteger legacyId, NSString *action,
         return handleListChats(legacyId, params);
     } else if ([action isEqualToString:@"ping"]) {
         return successResponse(legacyId, @{@"pong": @YES});
+    } else if ([action isEqualToString:@"introspect"]) {
+        return handleIntrospect(legacyId, params);
     }
     // v2 actions
     if ([action isEqualToString:@"send-message"]) return handleSendMessage(legacyId, params);
