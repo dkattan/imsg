@@ -116,19 +116,15 @@ enum LaunchCommand {
     // version as the expectation: the launcher's readiness check (which runs
     // under the launch coordinator's lock) reuses the running helper only when
     // it reports the current version and kills + relaunches otherwise. Forcing
-    // skips the check entirely. Version-aware replacement is lock-coordinated,
-    // so overlapping launchers recheck after the first one replaces the helper.
+    // skips the check entirely. No preliminary probe happens here — probing
+    // before the lock would race a competing CLI for the legacy IPC response
+    // files, so all version inspection is done inside the coordinated
+    // readiness check.
     let expectedHelperVersion = force ? nil : IMsgVersion.current
-    let existingHelperVersion = force ? nil : launcher.injectedHelperVersion()
 
     if !runtime.jsonOutput {
       StdoutWriter.writeLine("Using dylib: \(resolvedPath)")
       StdoutWriter.writeLine("Launching Messages.app with injection...")
-      if !force, let existingHelperVersion, existingHelperVersion != IMsgVersion.current {
-        StdoutWriter.writeLine(
-          "Injected dylib reports version \(existingHelperVersion) but imsg is "
-            + "\(IMsgVersion.current); relaunching Messages.app to update the bridge...")
-      }
     }
 
     do {
