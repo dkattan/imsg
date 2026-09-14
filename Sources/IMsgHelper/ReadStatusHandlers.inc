@@ -383,6 +383,7 @@ static NSDictionary* handleStatus(NSInteger requestId, NSDictionary *params) {
         @"read_available": @(readAvailable),
         @"bridge_version": @2,
         @"v2_ready": @(rpcInboxTimer != nil),
+        @"helper_version": @IMSG_BRIDGE_HELPER_VERSION,
         @"attachment_metadata": @YES,
         @"client_message_guid": @(clientMessageGuid),
         @"selectors": selectors

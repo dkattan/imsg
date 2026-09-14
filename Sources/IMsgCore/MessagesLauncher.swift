@@ -108,6 +108,19 @@ import Foundation
       }
     }
 
+    /// Version reported by the currently injected dylib, if it is ready and
+    /// new enough to expose one. Older helpers simply omit the field.
+    public func injectedHelperVersion() -> String? {
+      guard hasReadyLockFile() else { return nil }
+      let response = try? sendCommandSync(
+        action: "status",
+        params: [:],
+        timeout: IMsgBridgeProtocol.defaultResponseTimeout
+      )
+      guard let response, (response["success"] as? Bool) == true else { return nil }
+      return response["helper_version"] as? String
+    }
+
     /// Ensure Messages.app is running with our dylib injected.
     public func ensureRunning() throws {
       try launchCoordinator.runSynchronously(
@@ -420,6 +433,7 @@ import Foundation
 
     public func hasReadyLockFile() -> Bool { false }
     public func isInjectedAndReady() -> Bool { false }
+    public func injectedHelperVersion() -> String? { nil }
 
     public func ensureRunning() throws {
       throw MessagesLauncherError.launchFailed("Messages.app is only available on macOS.")

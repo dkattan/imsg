@@ -106,6 +106,10 @@ imCreateThreadIdentifierFn(void) {
     return fn;
 }
 
+// Generated release marker; reported via the status handler and compared by
+// the CLI against its own version to detect a stale injected dylib.
+#include "BridgeVersion.h"
+
 // Feature fragments share this translation unit to preserve private linkage.
 #include "BridgeState.inc"
 #include "IMCoreDeclarations.inc"
