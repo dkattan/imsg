@@ -13,8 +13,9 @@ enum LaunchCommand {
       that require IMCore framework access.
 
       If Messages.app is already running with a dylib injected by a different
-      imsg version, it is killed and relaunched with the current dylib.
-      Pass --force to relaunch even when the running dylib matches.
+      imsg version, it is killed and relaunched with the current dylib under
+      the launch lock. Pass --force to relaunch even when the running dylib
+      matches.
 
       Requires SIP (System Integrity Protection) to be disabled.
       """,
@@ -111,47 +112,33 @@ enum LaunchCommand {
     launcher.dylibPath = resolvedPath
 
     // A dylib injected by an older release keeps answering the readiness ping,
-    // so ensureRunning() would silently keep the stale bridge. Probe the
-    // running helper's version first; a mismatch (or an unversioned helper,
-    // which predates this check) forces a kill + relaunch below. --force
-    // skips the check and always relaunches.
+    // so ensureRunning() would silently keep the stale bridge. Pass the CLI's
+    // version as the expectation: the launcher's readiness check (which runs
+    // under the launch coordinator's lock) reuses the running helper only when
+    // it reports the current version and kills + relaunches otherwise. Forcing
+    // skips the check entirely. Version-aware replacement is lock-coordinated,
+    // so overlapping launchers recheck after the first one replaces the helper.
+    let expectedHelperVersion = force ? nil : IMsgVersion.current
     let existingHelperVersion = force ? nil : launcher.injectedHelperVersion()
-    let needsRelaunch = force || existingHelperVersion != IMsgVersion.current
 
     if !runtime.jsonOutput {
       StdoutWriter.writeLine("Using dylib: \(resolvedPath)")
       StdoutWriter.writeLine("Launching Messages.app with injection...")
+      if !force, let existingHelperVersion, existingHelperVersion != IMsgVersion.current {
+        StdoutWriter.writeLine(
+          "Injected dylib reports version \(existingHelperVersion) but imsg is "
+            + "\(IMsgVersion.current); relaunching Messages.app to update the bridge...")
+      }
     }
 
     do {
-      // Capture whether a helper was already answering before the launch:
-      // the coordinator keeps such a Messages alive, and pre-version helpers
-      // report nil both before and after, so the lock file is the only signal
-      // that the running bridge still needs replacing.
-      let helperWasRunning = launcher.injectedHelperVersion() != nil || launcher.hasReadyLockFile()
-      let ensureRunning: () throws -> Void = launcher.ensureRunning
-      try ensureRunning()
-      if needsRelaunch, helperWasRunning {
-        if let existingHelperVersion {
-          if !runtime.jsonOutput {
-            StdoutWriter.writeLine(
-              "Injected dylib reports version \(existingHelperVersion) but imsg is "
-                + "\(IMsgVersion.current); relaunching Messages.app to update the bridge...")
-          }
-        } else if !force {
-          if !runtime.jsonOutput {
-            StdoutWriter.writeLine(
-              "Running bridge dylib predates version reporting; relaunching "
-                + "Messages.app to update the bridge...")
-          }
-        }
-        // The coordinator left the already-running Messages alive because its
-        // dylib still answers, so kill and relaunch to pick up the resolved
-        // dylib.
-        launcher.killMessages()
-        try await Task.sleep(nanoseconds: 1_000_000_000)
-        try ensureRunning()
-      }
+      // Both paths replace through the coordinator: the readiness check (and
+      // the skip when forcing) runs under the launch lock, so overlapping
+      // launchers serialize and recheck instead of double-killing Messages.
+      try await launcher.ensureRunning(
+        expectedHelperVersion: expectedHelperVersion,
+        force: force
+      )
       if runtime.jsonOutput {
         try JSONLines.print([
           "status": "launched",

@@ -50,12 +50,13 @@ import Foundation
 
     private let messagesAppPath =
       "/System/Applications/Messages.app/Contents/MacOS/Messages"
-    private let queue = DispatchQueue(label: "imsg.messages.launcher")
+    let queue = DispatchQueue(label: "imsg.messages.launcher")
     private let commandLock = NSLock()
     private let launchCoordinator: BridgeLaunchCoordinator
     private let containerPathOverride: String?
     private let readyCheckOverride: (() -> Bool)?
     private let injectedReadyCheckOverride: (() -> Bool)?
+    private let helperVersionOverride: (() -> String?)?
     private let launchOverride: (() throws -> Void)?
 
     /// Path to the dylib to inject.
@@ -65,11 +66,13 @@ import Foundation
       containerPath: String? = nil,
       readyCheck: (() -> Bool)? = nil,
       injectedReadyCheck: (() -> Bool)? = nil,
+      helperVersion: (() -> String?)? = nil,
       launch: (() throws -> Void)? = nil
     ) {
       self.containerPathOverride = containerPath
       self.readyCheckOverride = readyCheck
       self.injectedReadyCheckOverride = injectedReadyCheck
+      self.helperVersionOverride = helperVersion
       self.launchOverride = launch
       self.launchCoordinator = BridgeLaunchCoordinator(
         lockFilePath: (containerPath
@@ -108,9 +111,26 @@ import Foundation
       }
     }
 
+    /// Readiness check used by ensureRunning: a ready helper is only reused
+    /// when it reports the expected release version. Runs inside the launch
+    /// coordinator's lock, so a stale helper found here is replaced by the
+    /// same launch operation instead of an unlocked kill afterwards.
+    func isInjectedAndReadyForLaunch(expectedHelperVersion: String?) -> Bool {
+      guard isInjectedAndReady() else {
+        return false
+      }
+      guard let expectedHelperVersion else {
+        return true
+      }
+      return helperVersion() == expectedHelperVersion
+    }
+
     /// Version reported by the currently injected dylib, if it is ready and
     /// new enough to expose one. Older helpers simply omit the field.
-    public func injectedHelperVersion() -> String? {
+    func helperVersion() -> String? {
+      if let helperVersionOverride {
+        return helperVersionOverride()
+      }
       guard hasReadyLockFile() else { return nil }
       let response = try? sendCommandSync(
         action: "status",
@@ -121,10 +141,26 @@ import Foundation
       return response["helper_version"] as? String
     }
 
-    /// Ensure Messages.app is running with our dylib injected.
-    public func ensureRunning() throws {
+    /// Version reported by the currently injected dylib, if it is ready and
+    /// new enough to expose one. Older helpers simply omit the field.
+    public func injectedHelperVersion() -> String? {
+      helperVersion()
+    }
+
+    /// Ensure Messages.app is running with our dylib injected. When the
+    /// running helper predates the expected version (nil = any ready helper
+    /// qualifies), it is killed and relaunched under the launch lock. Pass
+    /// force to relaunch even when a matching helper is ready. Concurrent
+    /// launchers recheck under the lock and reuse the first one's result.
+    public func ensureRunning(
+      expectedHelperVersion: String? = nil,
+      force: Bool = false
+    ) throws {
       try launchCoordinator.runSynchronously(
-        readinessCheck: isInjectedAndReady,
+        readinessCheck: { [weak self] in
+          guard let self, !force else { return false }
+          return self.isInjectedAndReadyForLaunch(expectedHelperVersion: expectedHelperVersion)
+        },
         operation: performLaunchInjectedMessages
       )
     }
@@ -224,44 +260,6 @@ import Foundation
       _ = ProcessTimeout.waitUntilExit(task, timeout: Self.helperProcessTimeout)
     }
 
-    /// Send a command asynchronously.
-    public func sendCommand(
-      action: String, params: [String: Any]
-    ) async throws -> [String: Any] {
-      try await sendCommand(
-        action: action,
-        params: params,
-        timeout: IMsgBridgeProtocol.defaultResponseTimeout
-      )
-    }
-
-    /// Send a command asynchronously with an explicit response timeout.
-    public func sendCommand(
-      action: String, params: [String: Any], timeout: TimeInterval
-    ) async throws -> [String: Any] {
-      try await ensureRunning()
-      // Serialize params to JSON data to cross the Sendable boundary safely
-      let paramsData = try JSONSerialization.data(withJSONObject: params, options: [])
-      return try await withCheckedThrowingContinuation {
-        (continuation: CheckedContinuation<[String: Any], Error>) in
-        queue.async {
-          do {
-            let deserializedParams =
-              (try? JSONSerialization.jsonObject(with: paramsData, options: []))
-              as? [String: Any] ?? [:]
-            let response = try self.sendCommandSync(
-              action: action,
-              params: deserializedParams,
-              timeout: timeout
-            )
-            continuation.resume(returning: response)
-          } catch {
-            continuation.resume(throwing: error)
-          }
-        }
-      }
-    }
-
     // MARK: - Private
 
     private func launchWithInjection() throws {
@@ -313,7 +311,7 @@ import Foundation
       throw MessagesLauncherError.socketTimeout
     }
 
-    private func sendCommandSync(
+    func sendCommandSync(
       action: String, params: [String: Any], timeout: TimeInterval
     ) throws -> [String: Any] {
       commandLock.lock()
@@ -404,9 +402,15 @@ import Foundation
       return .unknown(output)
     }
 
-    public func ensureRunning() async throws {
+    public func ensureRunning(
+      expectedHelperVersion: String? = nil,
+      force: Bool = false
+    ) async throws {
       try await launchCoordinator.run(
-        readinessCheck: isInjectedAndReady,
+        readinessCheck: { [weak self] in
+          guard let self, !force else { return false }
+          return self.isInjectedAndReadyForLaunch(expectedHelperVersion: expectedHelperVersion)
+        },
         operation: performLaunchInjectedMessages
       )
     }
@@ -416,68 +420,6 @@ import Foundation
         readinessCheck: hasReadyLockFile,
         operation: performLaunchInjectedMessages
       )
-    }
-  }
-#else
-  /// Non-macOS stub. Linux can read copied Messages databases, but there is no
-  /// Messages.app process, SIP state, or DYLD injection bridge to launch.
-  public final class MessagesLauncher: @unchecked Sendable {
-    public static let shared = MessagesLauncher()
-
-    public var dylibPath: String = ".build/release/imsg-bridge-helper.dylib"
-    public var bridgeInboxDirectory: String { "/nonexistent/.imsg-rpc/in" }
-    public var bridgeOutboxDirectory: String { "/nonexistent/.imsg-rpc/out" }
-    public var bridgeEventsFile: String { "/nonexistent/.imsg-events.jsonl" }
-
-    private init() {}
-
-    public func hasReadyLockFile() -> Bool { false }
-    public func isInjectedAndReady() -> Bool { false }
-    public func injectedHelperVersion() -> String? { nil }
-
-    public func ensureRunning() throws {
-      throw MessagesLauncherError.launchFailed("Messages.app is only available on macOS.")
-    }
-
-    public func ensureRunning() async throws {
-      throw MessagesLauncherError.launchFailed("Messages.app is only available on macOS.")
-    }
-
-    public func ensureLaunched() throws {
-      throw MessagesLauncherError.launchFailed("Messages.app is only available on macOS.")
-    }
-
-    public func ensureLaunched() async throws {
-      throw MessagesLauncherError.launchFailed("Messages.app is only available on macOS.")
-    }
-
-    public func killMessages() {}
-
-    public func sendCommand(action: String, params: [String: Any]) async throws -> [String: Any] {
-      try await sendCommand(
-        action: action,
-        params: params,
-        timeout: IMsgBridgeProtocol.defaultResponseTimeout
-      )
-    }
-
-    public func sendCommand(
-      action: String, params: [String: Any], timeout: TimeInterval
-    ) async throws -> [String: Any] {
-      _ = action
-      _ = params
-      _ = timeout
-      throw MessagesLauncherError.launchFailed("Messages.app is only available on macOS.")
-    }
-
-    public enum SIPStatus: Equatable, Sendable {
-      case enabled
-      case disabled
-      case unknown(String)
-    }
-
-    public static func currentSIPStatus() -> SIPStatus {
-      .unknown("System Integrity Protection is a macOS-only concept.")
     }
   }
 #endif

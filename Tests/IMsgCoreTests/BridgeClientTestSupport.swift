@@ -62,6 +62,64 @@ final class BridgeClientHarness: @unchecked Sendable {
   }
 }
 
+/// Launch state for version-aware replacement tests: models a running helper
+/// that answers pings with a stale version until replaced.
+final class VersionedLaunchState: @unchecked Sendable {
+  let currentVersion = "test-current"
+  let launchStarted = AsyncTestSignal()
+  let secondTaskScheduled = AsyncTestSignal()
+  private let launchGate = DispatchSemaphore(value: 0)
+  private let lock = NSLock()
+  private var ready = false
+  private var helperVersion: String?
+  private var replacements = 0
+
+  var replacementCount: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return replacements
+  }
+
+  func checkReady() -> Bool {
+    lock.lock()
+    let result = ready
+    lock.unlock()
+    return result
+  }
+
+  func reportedHelperVersion() -> String? {
+    lock.lock()
+    defer { lock.unlock() }
+    return helperVersion
+  }
+
+  func stageStaleHelper() {
+    lock.lock()
+    ready = true
+    helperVersion = "stale-old"
+    lock.unlock()
+  }
+
+  func launch() {
+    lock.lock()
+    replacements += 1
+    let shouldWait = replacements == 1
+    lock.unlock()
+    launchStarted.signal()
+    if shouldWait {
+      launchGate.wait()
+    }
+    lock.lock()
+    ready = true
+    helperVersion = currentVersion
+    lock.unlock()
+  }
+
+  func allowLaunch() {
+    launchGate.signal()
+  }
+}
+
 final class LaunchAttemptState: @unchecked Sendable {
   let launchStarted = AsyncTestSignal()
   let secondTaskScheduled = AsyncTestSignal()

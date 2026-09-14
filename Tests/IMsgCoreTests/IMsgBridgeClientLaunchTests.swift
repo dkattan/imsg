@@ -4,6 +4,51 @@ import Testing
 @testable import IMsgCore
 
 extension IMsgBridgeClientQueueTests {
+  /// Two competing launchers both observe a stale helper. The first replaces
+  /// it under the coordinator lock; the second must recheck under the lock,
+  /// see the freshly updated helper, and reuse it instead of killing it.
+  @Test
+  func concurrentVersionAwareLaunchersPerformOneReplacement() async throws {
+    let state = VersionedLaunchState()
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let makeLauncher = {
+      MessagesLauncher(
+        containerPath: root.path,
+        readyCheck: { state.checkReady() },
+        injectedReadyCheck: { state.checkReady() },
+        helperVersion: { state.reportedHelperVersion() },
+        launch: { state.launch() })
+    }
+    let firstLauncher = makeLauncher()
+    let secondLauncher = makeLauncher()
+
+    // Readiness gate: the stale helper answers the ping until the first
+    // replacement finishes, after which the relaunched helper is ready and
+    // reports the current version.
+    state.stageStaleHelper()
+
+    let first = Task.detached {
+      try await firstLauncher.ensureRunning(expectedHelperVersion: state.currentVersion)
+    }
+    // Hold the first launcher inside its locked launch so the second observes
+    // the same stale version and queues behind the coordinator.
+    await state.launchStarted.wait()
+    let second = Task.detached {
+      state.secondTaskScheduled.signal()
+      try await secondLauncher.ensureRunning(expectedHelperVersion: state.currentVersion)
+    }
+    await state.secondTaskScheduled.wait()
+    state.allowLaunch()
+
+    try await first.value
+    try await second.value
+    #expect(state.replacementCount == 1)
+    #expect(state.checkReady())
+    #expect(state.reportedHelperVersion() == state.currentVersion)
+  }
+
   @Test
   func concurrentReadinessCallsShareOneLaunchAttempt() async throws {
     let state = LaunchAttemptState()
