@@ -141,12 +141,6 @@ import Foundation
       return response["helper_version"] as? String
     }
 
-    /// Version reported by the currently injected dylib, if it is ready and
-    /// new enough to expose one. Older helpers simply omit the field.
-    public func injectedHelperVersion() -> String? {
-      helperVersion()
-    }
-
     /// Ensure Messages.app is running with our dylib injected. When the
     /// running helper predates the expected version (nil = any ready helper
     /// qualifies), it is killed and relaunched under the launch lock. Pass

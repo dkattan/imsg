@@ -112,7 +112,7 @@ func releasePhoneResourceLocatorResolvesExecutableSymlinks() throws {
 }
 
 @Test
-func developmentHelperTargetsDeclaredMacOSMinimum() throws {
+func developmentHelperGeneratesVersionAndTargetsDeclaredMacOSMinimum() throws {
   let root = try buildFixture()
   defer { try? FileManager.default.removeItem(at: root) }
   let sources = root.appendingPathComponent("Sources")
@@ -120,6 +120,14 @@ func developmentHelperTargetsDeclaredMacOSMinimum() throws {
   try FileManager.default.copyItem(
     at: buildScriptRoot.appendingPathComponent("Sources/IMsgHelper"),
     to: sources.appendingPathComponent("IMsgHelper"))
+  let scripts = root.appendingPathComponent("scripts")
+  try FileManager.default.createDirectory(at: scripts, withIntermediateDirectories: true)
+  try FileManager.default.copyItem(
+    at: buildScriptRoot.appendingPathComponent("scripts/generate-version.sh"),
+    to: scripts.appendingPathComponent("generate-version.sh"))
+  let version = "7.8.9-build-fixture"
+  try "MARKETING_VERSION=\(version)\n".write(
+    to: root.appendingPathComponent("version.env"), atomically: true, encoding: .utf8)
   _ = try runBuildTool(
     "/usr/bin/make",
     ["-f", buildScriptRoot.appendingPathComponent("Makefile").path, "build-dylib"], at: root)
@@ -127,4 +135,9 @@ func developmentHelperTargetsDeclaredMacOSMinimum() throws {
   let metadata = try runBuildTool(
     "/usr/bin/xcrun", ["vtool", "-show-build", binary.path], at: root)
   #expect(metadata.contains("minos 14.0"))
+  let strings = try runBuildTool("/usr/bin/strings", [binary.path], at: root)
+  #expect(strings.split(separator: "\n").contains(Substring(version)))
+  let cliVersion = try String(
+    contentsOf: sources.appendingPathComponent("imsg/Version.swift"), encoding: .utf8)
+  #expect(cliVersion.contains(version))
 }

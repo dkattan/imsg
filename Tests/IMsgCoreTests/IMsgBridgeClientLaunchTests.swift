@@ -4,6 +4,22 @@ import Testing
 @testable import IMsgCore
 
 extension IMsgBridgeClientQueueTests {
+  @Test(arguments: [nil, "stale-old", "test-current"], [false, true])
+  func versionAwareLaunchReusesOnlyMatchingHelper(version: String?, force: Bool) throws {
+    let state = VersionedLaunchState()
+    state.stageStaleHelper(version: version)
+    state.allowLaunch()
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let launcher = MessagesLauncher(
+      containerPath: root.path,
+      injectedReadyCheck: { state.checkReady() },
+      helperVersion: { state.reportedHelperVersion() },
+      launch: { state.launch() })
+    try launcher.ensureRunning(expectedHelperVersion: state.currentVersion, force: force)
+    #expect(state.replacementCount == (force || version != state.currentVersion ? 1 : 0))
+  }
+
   /// Two competing launchers both observe a stale helper. The first replaces
   /// it under the coordinator lock; the second must recheck under the lock,
   /// see the freshly updated helper, and reuse it instead of killing it.

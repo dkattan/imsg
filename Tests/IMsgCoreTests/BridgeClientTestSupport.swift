@@ -93,10 +93,10 @@ final class VersionedLaunchState: @unchecked Sendable {
     return helperVersion
   }
 
-  func stageStaleHelper() {
+  func stageStaleHelper(version: String? = "stale-old") {
     lock.lock()
     ready = true
-    helperVersion = "stale-old"
+    helperVersion = version
     lock.unlock()
   }
 

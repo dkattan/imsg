@@ -56,10 +56,12 @@ enum StatusCommand {
     var v2Ready: Bool = false
     var selectors: [String: Bool] = [:]
     var helperVersion: String?
+    var helperResponded = false
     var unresponsiveMessage: String?
     if availability.available {
       do {
         let data = try await probe()
+        helperResponded = true
         bridgeVersion = (data["bridge_version"] as? Int) ?? 0
         v2Ready = (data["v2_ready"] as? Bool) ?? false
         helperVersion = data["helper_version"] as? String
@@ -82,7 +84,13 @@ enum StatusCommand {
     // update the bridge. Surface the mismatch instead of failing deep inside
     // feature requests with confusing RPC errors.
     let helperVersionMismatch: String? = {
-      guard let helperVersion, helperVersion != IMsgVersion.current else { return nil }
+      guard helperResponded, helperVersion != IMsgVersion.current else { return nil }
+      guard let helperVersion else {
+        return """
+          The injected bridge dylib predates release version reporting. Run `imsg launch` \
+          to relaunch Messages.app with the current dylib.
+          """
+      }
       return """
         The injected bridge dylib reports version \(helperVersion), but this CLI is \
         \(IMsgVersion.current). Run `imsg launch` to relaunch Messages.app with the \

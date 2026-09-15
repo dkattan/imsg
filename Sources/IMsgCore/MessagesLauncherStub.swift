@@ -15,7 +15,6 @@
 
     public func hasReadyLockFile() -> Bool { false }
     public func isInjectedAndReady() -> Bool { false }
-    public func injectedHelperVersion() -> String? { nil }
 
     public func ensureRunning(
       expectedHelperVersion: String? = nil,

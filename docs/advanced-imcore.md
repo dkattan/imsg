@@ -13,7 +13,7 @@ You almost certainly do not need any of this for normal use.
 
 - `imsg read --to <handle> [--chat-id <id>]` — mark a chat as read.
 - `imsg typing --to <handle> [--duration 5s] [--stop true]` — show or stop the typing indicator.
-- `imsg launch [--dylib <path>] [--kill-only]` — launch Messages.app with the helper dylib injected.
+- `imsg launch [--dylib <path>] [--kill-only] [--force]` — launch Messages.app with the helper dylib injected.
 - `imsg status` — read-only IMCore bridge status.
 - `imsg name-photo status|share --chat <guid>` — inspect the native offer
   eligibility or explicitly share your Messages Name & Photo with a chat.
@@ -65,6 +65,18 @@ make build-dylib   # produces .build/release/imsg-bridge-helper.dylib (arm64e)
 
 `imsg launch` refuses to inject when SIP is enabled. There's no override.
 
+After a CLI upgrade, `imsg launch` replaces an injected helper whose release
+version differs from the CLI or predates version reporting. Matching helpers
+are reused; `--force` restarts Messages even when the version matches. Version
+checks and replacement share the launch lock, so concurrent launches reuse the
+first caller's updated helper. Standalone `make build-dylib` builds generate
+the helper and CLI version markers from `version.env` before compilation.
+
+`imsg status` shows the running helper version and warns on a mismatch.
+JSON output includes `helper_version` when reported and
+`helper_version_mismatch` when it differs from the CLI or a successful probe
+omits the version. Status remains read-only; run `imsg launch` to update the helper.
+
 Each container has one active helper. Additional instances using the same updated
 helper wait without changing readiness or consuming requests, then take over
 when the owner exits. The owner also restores a ready marker removed during
@@ -72,9 +84,8 @@ launcher cleanup. The `.imsg-bridge-owner.lock` file is permanent; do not delete
 while a helper is running.
 
 Older injected helpers do not participate in ownership locking. After upgrading,
-stop the old injected Messages instance with `imsg launch --kill-only` before
-launching the updated helper. A patched helper cannot exclude an older helper
-that is still running.
+run `imsg launch` to replace them before using advanced operations. A patched
+helper cannot exclude an older helper that is still running.
 
 Launch waits up to 15 seconds for the bridge-ready file. On a host with slower
 cold starts, extend that wait for the CLI or its supervisor:

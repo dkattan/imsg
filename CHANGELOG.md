@@ -2,11 +2,12 @@
 
 ## Unreleased
 
-- **Compatibility:** The injected bridge helper now reports its version (`helper_version` in `status`). `imsg status` warns when the running dylib was injected by a different imsg release, and `imsg launch` automatically relaunches Messages.app when the running dylib is stale or predates version reporting; pass `--force` to relaunch unconditionally.
+- **Compatibility:** Replace stale injected helpers under the launch lock after an upgrade, report helper versions and mismatches in `status`, and generate matching helper/CLI versions for standalone builds. `imsg launch --force` relaunches unconditionally (#301, thanks @dkattan).
 
 ## 0.15.5 - 2026-09-14
 
 **Highlights:** Release executables no longer crash on phone metadata lookups through symlinks, distant date filters no longer crash, and group-photo staging is secure (thanks @SebTardif).
+
 - Fix release executables crashing on phone metadata lookup through symlinks by applying resource patches to each architecture's actual dependency checkout.
 - Fix CLI and RPC date filters crashing on valid distant dates such as year 9999; compare out-of-range bounds correctly instead of overflowing the database timestamp representation.
 - **Compatibility:** Securely stage group-photo files for CLI `chat-photo` and RPC `group.setIcon`, rejecting symlink paths before transfer; callers need write access to Messages' attachment staging directory, as with other attachments (#288, thanks @SebTardif).

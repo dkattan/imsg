@@ -99,6 +99,7 @@ func statusPreservesSetupFailure(json: Bool) async throws {
     let payload = try JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any]
     #expect(payload?["advanced_features"] as? Bool == false)
     #expect(payload?["message"] as? String == "System Integrity Protection (SIP) is enabled.")
+    #expect(payload?["helper_version_mismatch"] == nil)
   } else {
     #expect(output.contains("Not available"))
   }
@@ -120,6 +121,7 @@ func statusReportsProbeOutcome(error: IMsgBridgeError, json: Bool) async throws 
   }
   if json {
     let payload = try JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any]
+    #expect(payload?["helper_version_mismatch"] == nil)
     for key in ["advanced_features", "typing_indicators", "read_receipts"] {
       #expect(payload?[key] as? Bool == !timedOut)
     }
@@ -145,4 +147,31 @@ func statusReportsHealthyBridgeCapabilities() async throws {
   #expect(payload?["bridge_version"] as? Int == 2)
   #expect(payload?["v2_ready"] as? Bool == true)
   #expect((payload?["selectors"] as? [String: Bool])?["stickerSend"] == true)
+}
+
+@Test(arguments: [nil, "older-release", IMsgVersion.current], [false, true])
+func statusReportsHelperVersionMismatch(version: String?, json: Bool) async throws {
+  let values = ParsedValues(positional: [], options: [:], flags: json ? ["jsonOutput"] : [])
+  let (output, _) = try await StdoutCapture.capture {
+    try await StatusCommand.run(
+      values: values, runtime: RuntimeOptions(parsedValues: values),
+      availability: (true, "Connected to Messages.app."),
+      probe: {
+        var result: [String: Any] = ["bridge_version": 2, "v2_ready": true]
+        result["helper_version"] = version
+        return result
+      })
+  }
+  let mismatch = version != IMsgVersion.current
+  if json {
+    let payload = try JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any]
+    #expect(payload?["helper_version"] as? String == version)
+    #expect((payload?["helper_version_mismatch"] as? String != nil) == mismatch)
+  } else {
+    if let version {
+      #expect(output.contains("helper dylib version: \(version)"))
+    }
+    #expect(output.contains("WARNING:") == mismatch)
+  }
+  #expect(output.contains("imsg launch") == mismatch)
 }
